@@ -978,7 +978,7 @@
                         <div class="settings-row-icon" style="background:#f0f9ff;"><i class="fas fa-envelope" style="color:#0284c7;"></i></div>
                         <div class="settings-row-info">
                             <h4 id="sContactLabel">Contact</h4>
-                            <p>printsome-webapp@outlook.com</p>
+                            <p><a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="0777756e697374686a622a706265667777476872736b68686c2964686a">[email&#160;protected]</a></p>
                         </div>
                     </div>
                 </div>
@@ -1125,18 +1125,18 @@
 <!-- TOAST -->
 <div class="toast" id="toast"><i class="fas fa-check-circle"></i><span id="toastMsg">Bericht</span></div>
 
-<script>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
 // ============================================================
 // FIREBASE CONFIG
 // ============================================================
 const firebaseConfig = {
-  apiKey: "AIzaSyD5PszO1RFJYviRNdfQr-pgn9tN86AxAeg",
-  authDomain: "printstom-8eb67.firebaseapp.com",
-  projectId: "printstom-8eb67",
-  storageBucket: "printstom-8eb67.firebasestorage.app",
-  messagingSenderId: "319687831802",
-  appId: "1:319687831802:web:4122a6cee474ace1ae9943",
-  measurementId: "G-XW7GH6Y9ND"
+    apiKey: "AIzaSyBHmq2hPEyb2z89XIR4y-FlKJYpSObh8Iw",
+    authDomain: "printsome-b5197.firebaseapp.com",
+    projectId: "printsome-b5197",
+    storageBucket: "printsome-b5197.firebasestorage.app",
+    messagingSenderId: "558794337754",
+    appId: "1:558794337754:web:324c537a347d6e0991a4e3",
+    measurementId: "G-TL2RN2TRLR"
 };
 firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
@@ -1813,10 +1813,17 @@ async function loadProductRatings() {
 
 async function loadProductReviews(productId) {
     try {
-        const snap = await db.collection('productReviews').where('productId', '==', productId).orderBy('createdAt', 'desc').limit(20).get();
+        // No orderBy here to avoid requiring a Firestore composite index
+        const snap = await db.collection('productReviews').where('productId', '==', productId).limit(20).get();
         productReviews[productId] = [];
         snap.forEach(doc => productReviews[productId].push({ id: doc.id, ...doc.data() }));
-    } catch(e) {}
+        // Sort by createdAt descending in JS
+        productReviews[productId].sort((a, b) => {
+            const ta = a.createdAt ? a.createdAt.toMillis() : 0;
+            const tb = b.createdAt ? b.createdAt.toMillis() : 0;
+            return tb - ta;
+        });
+    } catch(e) { console.error('loadProductReviews error:', e); }
 }
 
 function createProductCard(product) {
@@ -1999,11 +2006,14 @@ async function saveRating(productId, rating) {
             else { total = d.total + 1; sum = d.sum + rating; }
         }
         await ref.set({ total, sum, average: sum/total, lastUpdated: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        // Update local cache immediately
         userRatings[productId] = rating;
         productRatings[productId] = { total, sum, average: sum/total };
         showToast(t('ratingSaved'));
-        openProductModal(productId);
-    } catch(e) { console.error(e); }
+        // Force re-fetch reviews so modal shows fresh data
+        delete productReviews[productId];
+        await openProductModal(productId);
+    } catch(e) { console.error(e); showToast('Fout bij opslaan beoordeling'); }
 }
 window.saveRating = saveRating;
 
@@ -2021,8 +2031,10 @@ async function submitReview(productId) {
             createdAt: firebase.firestore.FieldValue.serverTimestamp()
         });
         showToast(t('reviewSaved'));
-        openProductModal(productId);
-    } catch(e) { console.error(e); }
+        // Clear cache so openProductModal re-fetches fresh from Firestore
+        delete productReviews[productId];
+        await openProductModal(productId);
+    } catch(e) { console.error(e); showToast('Fout bij plaatsen recensie'); }
 }
 window.submitReview = submitReview;
 
@@ -2121,9 +2133,10 @@ async function submitReservation(productId) {
         });
         showToast(t('reserveSuccess'));
         closeModal('reserve');
+        // Re-fetch all user data so reservations page shows the new entry immediately
         await loadUserData(currentUser.uid);
         showPage('reservations');
-    } catch(e) { console.error(e); showToast('Fout bij reservering'); }
+    } catch(e) { console.error('submitReservation error:', e); showToast('Fout bij reservering: ' + e.message); }
 }
 window.submitReservation = submitReservation;
 
@@ -2132,23 +2145,39 @@ window.submitReservation = submitReservation;
 // ============================================================
 async function loadUserData(uid) {
     try {
-        const [favDoc, ratingsSnap, resSnap] = await Promise.all([
+        // Note: no orderBy on reservations to avoid needing a composite Firestore index
+        const [favDoc, ratingsSnap, resSnap, ratingsAllSnap] = await Promise.all([
             db.collection('userFavorites').doc(uid).get(),
             db.collection('userRatings').where('userId', '==', uid).get(),
-            db.collection('reservations').where('userId', '==', uid).orderBy('createdAt', 'desc').get()
+            db.collection('reservations').where('userId', '==', uid).get(),
+            db.collection('productRatings').get()
         ]);
+
         if (favDoc.exists) userFavorites = favDoc.data().productIds || [];
+
         userRatings = {};
         ratingsSnap.forEach(doc => { const d = doc.data(); userRatings[d.productId] = d.rating; });
+
+        // Re-load all product ratings so product cards show updated stars
+        productRatings = {};
+        ratingsAllSnap.forEach(doc => { productRatings[doc.id] = doc.data(); });
+
         userReservations = [];
         resSnap.forEach(doc => userReservations.push({ id: doc.id, ...doc.data() }));
+        // Sort by createdAt descending in JS (avoids needing Firestore composite index)
+        userReservations.sort((a, b) => {
+            const ta = a.createdAt ? a.createdAt.toMillis() : 0;
+            const tb = b.createdAt ? b.createdAt.toMillis() : 0;
+            return tb - ta;
+        });
+
         updateAuthUI();
         displayFeaturedProducts();
         displayAllProducts();
         updateFavoritesUI();
         updateReservationsUI();
         updateResBadge();
-    } catch(e) { console.error(e); }
+    } catch(e) { console.error('loadUserData error:', e); }
 }
 
 async function saveFavorites() {
@@ -2266,11 +2295,18 @@ async function loadAdminContent(tab) {
             </div>
         `;
     } else if (tab === 'reservations') {
-        const snap = await db.collection('reservations').orderBy('createdAt', 'desc').get();
+        const snap = await db.collection('reservations').get();
         if (!snap.size) { c.innerHTML = `<div class="empty-state"><i class="fas fa-calendar-times"></i><h3>Geen reserveringen</h3></div>`; return; }
+        // Sort by createdAt descending in JS (no composite index needed)
+        const allRes = [];
+        snap.forEach(doc => allRes.push({ id: doc.id, ...doc.data() }));
+        allRes.sort((a, b) => {
+            const ta = a.createdAt ? a.createdAt.toMillis() : 0;
+            const tb = b.createdAt ? b.createdAt.toMillis() : 0;
+            return tb - ta;
+        });
         c.innerHTML = '';
-        snap.forEach(doc => {
-            const res = { id: doc.id, ...doc.data() };
+        allRes.forEach(res => {
             const card = document.createElement('div');
             card.className = 'admin-card';
             const date = res.createdAt ? new Date(res.createdAt.toDate()).toLocaleString('nl-NL') : '';
@@ -2319,11 +2355,17 @@ async function loadAdminContent(tab) {
             c.appendChild(card);
         });
     } else if (tab === 'reviews') {
-        const snap = await db.collection('productReviews').orderBy('createdAt', 'desc').limit(50).get();
+        const snap = await db.collection('productReviews').limit(50).get();
         if (!snap.size) { c.innerHTML = `<div class="empty-state"><i class="fas fa-star"></i><h3>Geen recensies</h3></div>`; return; }
+        const allReviews = [];
+        snap.forEach(doc => allReviews.push({ id: doc.id, ...doc.data() }));
+        allReviews.sort((a, b) => {
+            const ta = a.createdAt ? a.createdAt.toMillis() : 0;
+            const tb = b.createdAt ? b.createdAt.toMillis() : 0;
+            return tb - ta;
+        });
         c.innerHTML = '';
-        snap.forEach(doc => {
-            const rv = { id: doc.id, ...doc.data() };
+        allReviews.forEach(rv => {
             const card = document.createElement('div');
             card.className = 'admin-card';
             const date = rv.createdAt ? new Date(rv.createdAt.toDate()).toLocaleString('nl-NL') : '';
